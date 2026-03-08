@@ -12,6 +12,8 @@
 #include <crtdbg.h>
 #include <conio.h>
 
+#include "Trace.h"
+#include "x64/Debug/ConsoleApplication1.tmh"
 
 //
 // **********************************************************
@@ -451,6 +453,8 @@ TestThreadPoolRoutine(
 
 int main()
 {
+    WPP_INIT_TRACING(NULL);
+
     char userInput[255] = { 0 };
 
     MY_THREAD_POOL tp = { 0 };
@@ -465,12 +469,13 @@ int main()
 
         goto start_thread_pool;
     }
-    
-    start_thread_pool:
+
+start_thread_pool:
 
     status = TpInit(&tp, 5);
     if (!NT_SUCCESS(status))
     {
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_INIT, "App failed with status 0x%x\n", status);
         goto CleanUp;
     }
 
@@ -479,7 +484,7 @@ int main()
 
     for (int i = 0; i < 100000; ++i)
     {
-        if (_kbhit()) 
+        if (_kbhit())
         {
             fgets(userInput, sizeof(userInput), stdin);
 
@@ -494,17 +499,22 @@ int main()
         status = TpEnqueueWorkItem(&tp, TestThreadPoolRoutine, &ctx);
         if (!NT_SUCCESS(status))
         {
+            TraceEvents(TRACE_LEVEL_ERROR, DBG_INIT, "App failed with status 0x%x\n", status);
+
             goto CleanUp;
         }
     }
 
-    stop_thread_pool:
+stop_thread_pool:
     TpUninit(&tp);
 
     /* If everything went well, this should output 100.000.000. */
     printf("Final number value = %d \r\n", ctx.Number);
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INIT, "Success!");
+    
 
 CleanUp:
     _CrtDumpMemoryLeaks();
+    WPP_CLEANUP();
     return status;
 }
