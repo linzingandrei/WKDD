@@ -11,6 +11,8 @@
 #include <assert.h>
 #include <crtdbg.h>
 #include <conio.h>
+#include <psapi.h>
+#include <tchar.h>
 
 #include "Trace.h"
 #include "x64/Debug/ConsoleApplication1.tmh"
@@ -284,9 +286,12 @@ TpUninit(
     ThreadPool->NumberOfThreads = 0;
 
     /* todo: empty the work queue and process the rest of the work items take care of synchronization! */
-    for (UINT32 i = 0; i < ThreadPool->NumberOfThreads; ++i)
+    while (!ListIsEmpty(&ThreadPool->Queue))
     {
-        ListRemoveTail(&ThreadPool->Queue);
+        LIST_ENTRY* entry = ListRemoveTail(&ThreadPool->Queue);
+        MY_WORK_ITEM* work = CONTAINING_RECORD(entry, MY_WORK_ITEM, WorkRoutine);
+        work->WorkRoutine(work->Context);
+        free(work);
     }
 
     /* And close the event handles. */
@@ -435,6 +440,7 @@ TestThreadPoolRoutine(
     _In_opt_ PVOID Context
 )
 {
+    Sleep(2000);
     MY_CONTEXT* ctx = (MY_CONTEXT*)(Context);
     if (NULL == ctx)
     {
@@ -446,9 +452,91 @@ TestThreadPoolRoutine(
         AcquireSRWLockExclusive(&ctx->ContextLock);
         ctx->Number++;
         ReleaseSRWLockExclusive(&ctx->ContextLock);
+        
+    }
+    return STATUS_SUCCESS;
+}
+
+typedef NTSTATUS(WINAPI* NQIP)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+
+VOID
+PrintProcessNameAndID(
+    DWORD processID
+)
+{
+    TCHAR szProcessName[MAX_PATH] = TEXT("<unknown>");
+    PROCESS_BASIC_INFORMATION processInformation;
+
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processID);
+
+    if (NULL != hProcess)
+    {
+        HMODULE hMod;
+        DWORD cbNeeded;
+
+        if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded))
+        {
+            GetModuleBaseName(hProcess, hMod, szProcessName, sizeof(szProcessName) / sizeof(TCHAR));
+        }
     }
 
-    return STATUS_SUCCESS;
+    //_tprintf(TEXT("%s  (PID: %u)\n"), szProcessName, processID);
+    //if (_tcscmp(szProcessName, TEXT("<unknown>")) != 0) {
+        //printf("%s  (PID: %u)\n", szProcessName, processID);
+        //_tprintf(TEXT("%s  (PID: %u)\n"), szProcessName, processID);
+
+        HMODULE ntdll = LoadLibraryA("ntdll.dll");
+
+        NQIP NtQueryInformationProcess = (NQIP)GetProcAddress(ntdll, "NtQueryInformationProcess");
+
+        OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processID);
+
+        NtQueryInformationProcess(hProcess, ProcessBasicInformation, &processInformation, sizeof(processInformation), NULL);
+
+        //printf("%p\n", processInformation.UniqueProcessId);
+
+        PEB peb;
+        ReadProcessMemory(hProcess, processInformation.PebBaseAddress, &peb, sizeof(peb), NULL);
+
+        RTL_USER_PROCESS_PARAMETERS processParameters;
+        ReadProcessMemory(hProcess, peb.ProcessParameters, &processParameters, sizeof(processParameters), NULL);
+
+        PWSTR buffer = processParameters.CommandLine.Buffer;
+        USHORT len = processParameters.CommandLine.Length;
+        PWSTR bufferCopy = (PWSTR)malloc(len);
+
+        ReadProcessMemory(hProcess, buffer, bufferCopy, len, NULL);
+
+        //printf("%s\n", bufferCopy);
+
+        printf("=========================================================================================\n");
+        _tprintf(TEXT("Process name: %s  (PID: %u)\n"), szProcessName, processID);
+        _tprintf(TEXT("Command line of process: %s\n"), bufferCopy);
+    //}
+
+    CloseHandle(hProcess);
+}
+
+INT
+ListAllRunningProcesses()
+{
+    DWORD aProcesses[1024], cbNeeded, cProcesses;
+    unsigned int i;
+
+    if (!EnumProcesses(aProcesses, sizeof(aProcesses), &cbNeeded))
+    {
+        return 1;
+    }
+
+    cProcesses = cbNeeded / sizeof(DWORD);
+
+    for (i = 0; i < cProcesses; i++)
+    {
+        if (aProcesses[i] != 0)
+        {
+            PrintProcessNameAndID(aProcesses[i]);
+        }
+    }
 }
 
 int main()
@@ -461,13 +549,39 @@ int main()
     MY_CONTEXT ctx = { 0 };
     NTSTATUS status = STATUS_UNSUCCESSFUL;
 
-    scanf_s("%s", userInput, sizeof(userInput));
+    while (true) {
+        scanf_s("%s", userInput, sizeof(userInput));
 
-    if (strncmp(userInput, "start", 5) == 0)
-    {
-        printf("ThreadPool started\n");
+        if (strncmp(userInput, "start", 5) == 0)
+        {
+            printf("ThreadPool started\n");
 
-        goto start_thread_pool;
+            goto start_thread_pool;
+        }
+
+        if (strncmp(userInput, "showproc", 8) == 0) {
+            printf("List of running processes:\n");
+
+            ListAllRunningProcesses();
+
+            userInput[0] = '\0';
+        }
+
+        if (strncmp(userInput, "exit", 4) == 0)
+        {
+            printf("Exiting...\n");
+
+            goto exit;
+        }
+
+        if (strncmp(userInput, "help", 4) == 0)
+        {
+            printf("\"start\" to begin threadpool execution\n");
+            printf("\"stop\" to stop threadpool execution\n");
+            printf("\"exit\" to end program (can use only before starting threadpool)\n");
+
+            userInput[0] = '\0';
+        }
     }
 
 start_thread_pool:
@@ -482,7 +596,7 @@ start_thread_pool:
     InitializeSRWLock(&ctx.ContextLock);
     ctx.Number = 0;
 
-    for (int i = 0; i < 100000; ++i)
+    for (int i = 0; i < 2; ++i)
     {
         if (_kbhit())
         {
@@ -511,10 +625,12 @@ stop_thread_pool:
     /* If everything went well, this should output 100.000.000. */
     printf("Final number value = %d \r\n", ctx.Number);
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INIT, "Success!");
-    
+
 
 CleanUp:
     _CrtDumpMemoryLeaks();
     WPP_CLEANUP();
     return status;
+exit:
+    return 0;
 }
